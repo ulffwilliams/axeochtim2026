@@ -1,20 +1,21 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Quicksand, Pacifico } from "next/font/google";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const quicksand = Quicksand({
+  variable: "--font-sans",
   subsets: ["latin"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const pacifico = Pacifico({
+  variable: "--font-script",
+  weight: "400",
   subsets: ["latin"],
 });
 
 export const metadata: Metadata = {
-  title: "Ladda upp bilder",
-  description: "Ladda upp bilder direkt till Google Drive",
+  title: "Axelina + Tim 2026 💕",
+  description: "Ladda upp bilder från bröllopet här",
 };
 
 export default function RootLayout({
@@ -25,7 +26,7 @@ export default function RootLayout({
   return (
     <html
       lang="sv"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${quicksand.variable} ${pacifico.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">{children}</body>
     </html>

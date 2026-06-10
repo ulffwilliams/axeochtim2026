@@ -14,7 +14,7 @@ const pacifico = Pacifico({
 });
 
 export const metadata: Metadata = {
-  title: "Axelina + Tim 2026 💕",
+  title: "Axelina + Tim 2026",
   description: "Ladda upp bilder från bröllopet här",
 };
 

@@ -42,20 +42,60 @@ export default function ImageUploader() {
     setUploading(true);
     setError(null);
 
-    const formData = new FormData();
-    files.forEach((file) => formData.append("files", file));
-
     try {
-      const res = await fetch("/api/upload", {
+      // Steg 1: be servern starta en resumable-upload-session per bild hos
+      // Google (litet JSON-anrop, ingen bilddata i denna request).
+      const sessionRes = await fetch("/api/upload", {
         method: "POST",
-        body: formData,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          files: files.map((file) => ({
+            name: file.name,
+            type: file.type,
+            size: file.size,
+          })),
+        }),
       });
-      const data = await res.json();
+      const sessionData = await sessionRes.json();
 
-      if (!res.ok) throw new Error(data.error);
+      if (!sessionRes.ok) throw new Error(sessionData.error);
 
-      setUploaded((prev) => [...prev, ...data.files]);
+      // Steg 2: PUT:a varje bilds bytes direkt till Google, förbi Vercels
+      // funktionsgräns för payload-storlek (4.5MB).
+      const newlyUploaded: UploadedFile[] = [];
+      let uploadError: string | null = null;
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const session = sessionData.sessions[i];
+
+        if (!session?.uploadUrl) {
+          uploadError = session?.error ?? "Något gick fel";
+          continue;
+        }
+
+        const putRes = await fetch(session.uploadUrl, {
+          method: "PUT",
+          headers: { "Content-Type": file.type },
+          body: file,
+        });
+
+        if (!putRes.ok) {
+          uploadError = "Uppladdningen misslyckades";
+          continue;
+        }
+
+        const uploaded = await putRes.json();
+        newlyUploaded.push({
+          id: uploaded.id,
+          name: uploaded.name,
+          link: uploaded.webViewLink,
+        });
+      }
+
+      setUploaded((prev) => [...prev, ...newlyUploaded]);
       setFiles([]);
+      if (uploadError) setError(uploadError);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Något gick fel");
     } finally {

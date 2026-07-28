@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { google } from 'googleapis'
-import { Readable } from 'stream'
 
 // Max filstorlek per bild (20 MB)
 const MAX_FILE_SIZE = 20 * 1024 * 1024
@@ -16,8 +15,22 @@ oauth2Client.setCredentials({
   refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
 })
 
-const drive = google.drive({ version: 'v3', auth: oauth2Client })
+interface FileMeta {
+  name: string
+  type: string
+  size: number
+}
 
+interface SessionResult {
+  name: string
+  uploadUrl?: string
+  error?: string
+}
+
+// Denna route strömmar inte längre bildbytes genom Vercel-funktionen
+// (som har en hård payload-gräns på 4.5MB). Den startar bara en
+// resumable-upload-session hos Google, och klienten PUT:ar sedan
+// bilddatan direkt till Google.
 export async function POST(request: NextRequest) {
   try {
     const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID
@@ -26,59 +39,66 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Servern är felkonfigurerad' }, { status: 500 })
     }
 
-    const formData = await request.formData()
-    const files = formData.getAll('files') as File[]
+    const { files } = (await request.json()) as { files: FileMeta[] }
 
     if (!files || files.length === 0) {
       return NextResponse.json({ error: 'Inga filer hittades' }, { status: 400 })
     }
 
-    const uploadedFiles = []
-    const skipped: string[] = []
-
-    for (const file of files) {
-      // Validera filtyp server-side (inte bara klienten)
-      if (!file.type.startsWith('image/')) {
-        skipped.push(file.name)
-        continue
-      }
-
-      // Validera filstorlek server-side
-      if (file.size > MAX_FILE_SIZE) {
-        skipped.push(file.name)
-        continue
-      }
-
-      const buffer = Buffer.from(await file.arrayBuffer())
-      const stream = Readable.from(buffer)
-
-      const response = await drive.files.create({
-        requestBody: {
-          name: file.name,
-          parents: [folderId],
-        },
-        media: {
-          mimeType: file.type,
-          body: stream,
-        },
-        fields: 'id, name, webViewLink',
-      })
-
-      uploadedFiles.push({
-        id: response.data.id,
-        name: response.data.name,
-        link: response.data.webViewLink,
-      })
+    const { token } = await oauth2Client.getAccessToken()
+    if (!token) {
+      console.error('Kunde inte hämta access token')
+      return NextResponse.json({ error: 'Servern är felkonfigurerad' }, { status: 500 })
     }
 
-    return NextResponse.json({
-      success: true,
-      files: uploadedFiles,
-      count: uploadedFiles.length,
-      skipped,
-    })
+    const sessions: SessionResult[] = []
+
+    for (const file of files) {
+      if (!file.type.startsWith('image/')) {
+        sessions.push({ name: file.name, error: 'Fel filtyp' })
+        continue
+      }
+
+      if (file.size > MAX_FILE_SIZE) {
+        sessions.push({ name: file.name, error: 'För stor fil' })
+        continue
+      }
+
+      const initRes = await fetch(
+        'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,webViewLink',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json; charset=UTF-8',
+            'X-Upload-Content-Type': file.type,
+            'X-Upload-Content-Length': String(file.size),
+          },
+          body: JSON.stringify({
+            name: file.name,
+            parents: [folderId],
+          }),
+        },
+      )
+
+      if (!initRes.ok) {
+        console.error('Kunde inte starta upload-session:', await initRes.text())
+        sessions.push({ name: file.name, error: 'Kunde inte starta uppladdning' })
+        continue
+      }
+
+      const uploadUrl = initRes.headers.get('location')
+      if (!uploadUrl) {
+        sessions.push({ name: file.name, error: 'Ingen upload-URL mottagen' })
+        continue
+      }
+
+      sessions.push({ name: file.name, uploadUrl })
+    }
+
+    return NextResponse.json({ sessions })
   } catch (error) {
-    console.error('Upload error:', error)
+    console.error('Upload-session error:', error)
     return NextResponse.json({ error: 'Uppladdningen misslyckades' }, { status: 500 })
   }
 }

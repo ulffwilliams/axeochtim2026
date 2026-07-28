@@ -8,6 +8,56 @@ interface UploadedFile {
   link: string;
 }
 
+// Måste vara en multipel av 256KB (Googles krav för resumable-chunkar,
+// utom sista chunken) och under Vercels gräns för request-payload (4.5MB).
+const CHUNK_SIZE = 3 * 1024 * 1024;
+const MAX_ATTEMPTS_PER_CHUNK = 3;
+
+async function uploadFileInChunks(
+  file: File,
+  uploadUrl: string,
+): Promise<{ id: string; name: string; webViewLink: string }> {
+  const total = file.size;
+  let start = 0;
+  let result: { id: string; name: string; webViewLink: string } | null = null;
+
+  while (start < total) {
+    const end = Math.min(start + CHUNK_SIZE, total) - 1;
+    const chunk = file.slice(start, end + 1);
+    const contentRange = `bytes ${start}-${end}/${total}`;
+
+    let lastError: Error | null = null;
+    let done = false;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_CHUNK && !done; attempt++) {
+      try {
+        const res = await fetch("/api/upload/chunk", {
+          method: "PUT",
+          headers: {
+            "X-Upload-Url": uploadUrl,
+            "X-Content-Range": contentRange,
+          },
+          body: chunk,
+        });
+        const data = await res.json();
+
+        if (!res.ok) throw new Error(data.error ?? "Chunk misslyckades");
+
+        if (data.done) result = data.file;
+        done = true;
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error("Chunk misslyckades");
+      }
+    }
+
+    if (!done) throw lastError ?? new Error("Chunk misslyckades");
+    start = end + 1;
+  }
+
+  if (!result) throw new Error("Uppladdningen misslyckades");
+  return result;
+}
+
 export default function ImageUploader() {
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -60,8 +110,8 @@ export default function ImageUploader() {
 
       if (!sessionRes.ok) throw new Error(sessionData.error);
 
-      // Steg 2: PUT:a varje bilds bytes direkt till Google, förbi Vercels
-      // funktionsgräns för payload-storlek (4.5MB).
+      // Steg 2: ladda upp varje fil i chunkar via vår egen server (Drive API
+      // stödjer inte CORS för direkt-PUT från webbläsaren).
       const newlyUploaded: UploadedFile[] = [];
       let uploadError: string | null = null;
 
@@ -74,23 +124,16 @@ export default function ImageUploader() {
           continue;
         }
 
-        const putRes = await fetch(session.uploadUrl, {
-          method: "PUT",
-          headers: { "Content-Type": file.type },
-          body: file,
-        });
-
-        if (!putRes.ok) {
-          uploadError = "Uppladdningen misslyckades";
-          continue;
+        try {
+          const uploaded = await uploadFileInChunks(file, session.uploadUrl);
+          newlyUploaded.push({
+            id: uploaded.id,
+            name: uploaded.name,
+            link: uploaded.webViewLink,
+          });
+        } catch (err) {
+          uploadError = err instanceof Error ? err.message : "Något gick fel";
         }
-
-        const uploaded = await putRes.json();
-        newlyUploaded.push({
-          id: uploaded.id,
-          name: uploaded.name,
-          link: uploaded.webViewLink,
-        });
       }
 
       setUploaded((prev) => [...prev, ...newlyUploaded]);
